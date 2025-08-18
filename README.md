@@ -36,3 +36,9 @@ The architecture follows these steps:
 6. **Aggregation & Analytics (6)**  
    - Aggregations, summaries, or feature calculations are performed using PySpark.
    - Aggregated results can be used for dashboards, reporting, or machine learning.
+
+## About Dataset Link
+This dataset simulates real-world smart farming operations powered by IoT sensors and satellite data. It captures environmental and operational variables that affect crop yield across 500 farms located in regions like India, the USA, and Africa.
+[Link](https://www.kaggle.com/datasets/atharvasoundankar/smart-farming-sensor-data-for-yield-prediction)
+
+Author :- Sudhanshu Pukale
