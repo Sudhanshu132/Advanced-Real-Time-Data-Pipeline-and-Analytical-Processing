@@ -31,7 +31,7 @@ The architecture follows these steps:
    - Transformed data is written into PostgreSQL for persistence and further querying.
 
 5. **Storing Raw Data (5)**  
-   - Original raw data is optionally stored in a data lake or warehouse (e.g., PostgreSQL, HDFS) for archival.
+   - Tranformed data is optionally stored in a data lake or warehouse (e.g., PostgreSQL, HDFS) for aggregation.
 
 6. **Aggregation & Analytics (6)**  
    - Aggregations, summaries, or feature calculations are performed using PySpark.
