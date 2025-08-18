@@ -13,7 +13,7 @@ Designed and implemented a scalable real-time data pipeline that monitors a dire
 
 # End-to-End ETL Architechture for Production ready.
 
-
+![Architecture](Architecturediagram.png)
 ## Architecture Overview
 
 The architecture follows these steps:
