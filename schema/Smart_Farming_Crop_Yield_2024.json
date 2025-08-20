@@ -1,0 +1,137 @@
+{
+    "type": "struct",
+    "fields": [
+        {
+            "name": "farm_id",
+            "type": "string",
+            "nullable": true,
+            "metadata": {}
+        },
+        {
+            "name": "region",
+            "type": "string",
+            "nullable": true,
+            "metadata": {}
+        },
+        {
+            "name": "crop_type",
+            "type": "string",
+            "nullable": true,
+            "metadata": {}
+        },
+        {
+            "name": "soil_moisture_%",
+            "type": "float",
+            "nullable": true,
+            "metadata": {}
+        },
+        {
+            "name": "soil_pH",
+            "type": "float",
+            "nullable": true,
+            "metadata": {}
+        },
+        {
+            "name": "temperature_C",
+            "type": "float",
+            "nullable": true,
+            "metadata": {}
+        },
+        {
+            "name": "rainfall_mm",
+            "type": "float",
+            "nullable": true,
+            "metadata": {}
+        },
+        {
+            "name": "humidity_%",
+            "type": "float",
+            "nullable": true,
+            "metadata": {}
+        },
+        {
+            "name": "sunlight_hours",
+            "type": "float",
+            "nullable": true,
+            "metadata": {}
+        },
+        {
+            "name": "irrigation_type",
+            "type": "string",
+            "nullable": true,
+            "metadata": {}
+        },
+        {
+            "name": "fertilizer_type",
+            "type": "string",
+            "nullable": true,
+            "metadata": {}
+        },
+        {
+            "name": "pesticide_usage_ml",
+            "type": "float",
+            "nullable": true,
+            "metadata": {}
+        },
+        {
+            "name": "sowing_date",
+            "type": "date",
+            "nullable": true,
+            "metadata": {}
+        },
+        {
+            "name": "harvest_date",
+            "type": "date",
+            "nullable": true,
+            "metadata": {}
+        },
+        {
+            "name": "total_days",
+            "type": "integer",
+            "nullable": true,
+            "metadata": {}
+        },
+        {
+            "name": "yield_kg_per_hectare",
+            "type": "float",
+            "nullable": true,
+            "metadata": {}
+        },
+        {
+            "name": "sensor_id",
+            "type": "string",
+            "nullable": true,
+            "metadata": {}
+        },
+        {
+            "name": "timestamp",
+            "type": "timestamp",
+            "nullable": true,
+            "metadata": {}
+        },
+        {
+            "name": "latitude",
+            "type": "double",
+            "nullable": true,
+            "metadata": {}
+        },
+        {
+            "name": "longitude",
+            "type": "double",
+            "nullable": true,
+            "metadata": {}
+        },
+        {
+            "name": "NDVI_index",
+            "type": "float",
+            "nullable": true,
+            "metadata": {}
+        },
+        {
+            "name": "crop_disease_status",
+            "type": "string",
+            "nullable": true,
+            "metadata": {}
+        }
+    ]
+}
