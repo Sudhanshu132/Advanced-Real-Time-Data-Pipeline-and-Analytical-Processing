@@ -3,8 +3,10 @@ import boto3
 from botocore.exceptions import ClientError
 from config import *
 import json
+from helpers import retry
 
 
+@retry(max_attempts=3, delay=5)
 def initialize_bucket(bucket_name, folders=None):
     """Create a bucket if it doesn't exist and create specified subfolders."""
     s3 = boto3.client(
@@ -30,8 +32,9 @@ def initialize_bucket(bucket_name, folders=None):
     if folders:
         for folder in folders:
             s3.put_object(Bucket=bucket_name, Key=f"{folder}/")  # trailing slash to indicate folder
-            print(f"Folder '{folder}/' created in bucket '{bucket_name}'.")
+            print(f"Folder '{folder}/' created in bucket '{bucket_name}'.")         
 
+@retry(max_attempts=3, delay=5)
 def move_files_to_folder(file_paths, dest_folder):
     """Move specific files to a folder (processed or quarantine) in MinIO."""
 

@@ -1,9 +1,10 @@
 from pyspark.sql import SparkSession
-from pyspark.sql.functions import input_file_name, lit, current_timestamp
+from pyspark.sql.functions import input_file_name
 from pyspark.sql.types import StructType
 from config import * 
 from utils import *
 from helpers import *
+import time
 
 # ----------------- Spark Session -----------------
 spark = SparkSession.builder \
@@ -35,42 +36,33 @@ streaming = spark.readStream.format("text") \
 
 # ----------------- Batch Processing -----------------
 def process_batch(batch_df, batch_id):
-    """
-    Process each incoming file independently, with per-file schema check, safe reads,
-    and safe move to processed/quarantine folders.
-    """
     logger.info(f"Processing batch {batch_id} with {batch_df.count()} files")
-    
-    # Collect distinct file paths in this batch
-    file_paths = [r.file_path for r in batch_df.select("file_path").distinct().collect()]
+    files_by_fmt = batch_df.select("file_path").distinct().rdd \
+        .map(lambda r: r.file_path) \
+        .groupBy(lambda f: f.split(".")[-1].lower()) \
+        .mapValues(list) \
+        .collectAsMap()
 
-    for file_path in file_paths:
-        fmt = file_path.split(".")[-1].lower()
+    for fmt, paths in files_by_fmt.items():
+        file_name_list = ",".join(paths)
+        good_file_paths = []
+        bad_file_paths = []
+
         try:
-            logger.info(f"Processing file: {file_path}")
-
-            # --- Load schema for this file ---
-            schema_file_name = derive_schema_filename(file_path)
+            # --- Dynamic schema load from S3 ---
+            schema_file_name = derive_schema_filename(paths[0])
             schema_json = read_schema(schema_file_name)
             schema = StructType.fromJson(schema_json) if schema_json else None
 
-            # --- Read the file safely ---
-            raw = read_batch_files([file_path], fmt, spark, schema=schema)
+            raw = read_batch_files(paths, fmt, spark, schema=schema)
 
-            # Trigger action to ensure Spark reads the file
-            row_count = raw.count()
-            if row_count == 0:
-                logger.warning(f"No data in file: {file_path}")
-                move_files_to_folder([file_path], "qurantine")
-                continue
-
-            # --- Data Processing ---
+            # ----------------- Data Processing -----------------
             trimmed = trim_all_strings(raw)
             non_all_null = drop_all_null_rows(trimmed)
 
             good, bad = validate_and_quarantine(
                 non_all_null,
-                file_path,
+                file_name_list,
                 BUCKET_QURANTINE,
                 key_fields=["sensor_id", "timestamp", "temperature_C"],
                 numeric_fields=["temperature_C"],
@@ -78,55 +70,61 @@ def process_batch(batch_df, batch_id):
                 heavy_null_threshold=0.5
             )
 
-            good_with_meta = add_metadata(good, file_path)
+            good_with_meta = add_metadata(good, file_name_list)
 
-            # --- Write Good Data to PostgreSQL ---
+            # ----------------- Write Good Data -----------------
             if not good_with_meta.rdd.isEmpty():
-                table = derive_table_name(file_path, fmt)
-                logger.info(f"Writing {good_with_meta.count()} rows to PostgreSQL table: {table}_transformed")
-                good_with_meta.write.jdbc(DB_URL, f"{table}_transformed", "append", properties=JDBC_PROPERTIES)
+                table = derive_table_name(paths[0])
+                logger.info(f"Writing {good_with_meta.count()} rows to PostgreSQL table: {table}")
+                # good_with_meta.write.jdbc(DB_URL, f"{table}_transformed", "append", properties=JDBC_PROPERTIES)
+                write_jdbc(good_with_meta, f"{table}_transformed")
+                # --- Aggregated Metrics (optional) ---
+                apply_aggregations(good_with_meta, f"{table}_agg")
 
-                # --- Aggregated Metrics ---
-                apply_aggregations(good_with_meta, file_path, fmt)
+            # ----------------- Collect File Paths -----------------
+            if not good.rdd.isEmpty():
+                good_file_paths = set(r.file_path for r in good.select("file_path").distinct().collect())
+            if not bad.rdd.isEmpty():
+                bad_file_paths = set(r.file_path for r in bad.select("file_path").distinct().collect())
+                bad_file_paths -= good_file_paths  # Remove overlap
 
-            # --- Materialize counts to avoid lazy execution ---
-            good_rows = good_with_meta.count() if not good_with_meta.rdd.isEmpty() else 0
-            bad_rows = bad.count() if not bad.rdd.isEmpty() else 0
-
-            # --- Move files safely after processing ---
-            if good_rows > 0:
-                move_files_to_folder([file_path], "processed")
-            if bad_rows > 0:
-                move_files_to_folder([file_path], "qurantine")
-
-            # --- Write Audit Logs ---
+            # ----------------- Write Audit Logs -----------------
             write_audit(
-                spark, BUCKET_AUDIT, file_path, fmt,
-                total=row_count,
-                good=good_rows,
-                bad=bad_rows,
+                spark, BUCKET_AUDIT, file_name_list, fmt,
+                total=raw.rdd.countApprox(5000),
+                good=good_with_meta.rdd.countApprox(5000),
+                bad=bad.rdd.countApprox(5000),
                 status="SUCCESS",
                 message=f"Batch {batch_id}"
             )
 
-            logger.info(f"File {file_path} processed successfully.")
+            # ----------------- Move Files -----------------
+            if good_file_paths:
+                move_files_to_folder(list(good_file_paths), "processed")
+            if bad_file_paths:
+                move_files_to_folder(list(bad_file_paths), "qurantine")
+
+            logger.info(f"Batch {batch_id} processing completed for files: {file_name_list}")
 
         except Exception as e:
-            logger.error(f"Failed to process file: {file_path} | Error: {e}", exc_info=True)
+            logger.error(f"Batch {batch_id} failed for files: {file_name_list} | Error: {e}", exc_info=True)
             write_audit(
-                spark, BUCKET_AUDIT, file_path, fmt,
+                spark, BUCKET_AUDIT, file_name_list, fmt,
                 total=0, good=0, bad=0,
                 status="FAILURE",
                 message=str(e)
             )
-            move_files_to_folder([file_path], "qurantine")
+            move_files_to_folder(paths, "qurantine")
+            raise e
 
 # ----------------- Start Streaming -----------------
-logger.info("Starting streaming query")
-
-query = streaming.writeStream.trigger(processingTime=f"{TRIGGER_INTERVAL_SEC} seconds") \
-    .option("checkpointLocation", CHECKPOINT_PATH) \
-    .foreachBatch(process_batch) \
-    .start()
-
-query.awaitTermination()
+while True:
+    try:
+        query = streaming.writeStream.trigger(processingTime=f"{TRIGGER_INTERVAL_SEC} seconds") \
+                    .option("checkpointLocation", CHECKPOINT_PATH) \
+                    .foreachBatch(process_batch) \
+                    .start()
+        query.awaitTermination()
+    except Exception as e:
+        logger.error(f"Streaming query failed: {e}, restarting in 10s...")
+        time.sleep(10)

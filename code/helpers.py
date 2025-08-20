@@ -2,6 +2,8 @@ import hashlib
 import os
 import logging
 from datetime import datetime
+import time
+from functools import wraps
 from pyspark.sql import SparkSession
 from pyspark.sql.functions import col, trim, sha2, concat_ws, coalesce, lit, current_timestamp, when, date_format, isnan
 from pyspark.sql.types import StructType
@@ -12,6 +14,25 @@ from config import *
 logging.basicConfig(level=logging.INFO, format='%(asctime)s [%(levelname)s] %(message)s')
 logger = logging.getLogger(__name__)
 pg_schema = "public"
+
+def retry(max_attempts=3, delay=5, backoff=2):
+    def decorator(func):
+        @wraps(func)
+        def wrapper(*args, **kwargs):
+            attempts = 0
+            current_delay = delay
+            while attempts < max_attempts:
+                try:
+                    return func(*args, **kwargs)
+                except Exception as e:
+                    attempts += 1
+                    logger.error(f"Error in {func.__name__}: {e} | Attempt {attempts}/{max_attempts}")
+                    if attempts == max_attempts:
+                        raise
+                    time.sleep(current_delay)
+                    current_delay *= backoff
+        return wrapper
+    return decorator
 
 def md5_hex(s: str) -> str:
     return hashlib.md5(s.encode("utf-8")).hexdigest()
@@ -97,27 +118,32 @@ def validate_and_quarantine(df: DataFrame, file_name: str, quarantine_dir: str,
     return good, bad
 
 logger = logging.getLogger(__name__)
+# ---------------- Aggregations ----------------
+@retry(max_attempts=3, delay=5)
+def write_jdbc(df: DataFrame, table: str):
+    df.write.jdbc(DB_URL, table, "append", properties=JDBC_PROPERTIES)
 
-def apply_aggregations(df: DataFrame, file_name: str, fmt: str, data_source: str = "minio_bucket") -> DataFrame:
+
+def apply_aggregations(df: DataFrame, table: str, data_source: str = "minio_bucket") -> DataFrame:
     """
     Aggregates numeric columns per sensor_id (or default if missing) and adds metadata.
     Handles missing numeric columns gracefully.
     """
     if df is None or df.rdd.isEmpty():
-        logger.warning(f"No data to aggregate for {file_name}")
+        logger.warning(f"No data to aggregate for {table}")
         return None
 
     # Ensure grouping column exists
     group_col = "sensor_id"
     if group_col not in df.columns:
-        logger.warning(f"'{group_col}' column missing in {file_name}, adding default value 'unknown'")
+        logger.warning(f"'{group_col}' column missing in {table}, adding default value 'unknown'")
         df = df.withColumn(group_col, lit("unknown"))
 
     # Identify numeric columns dynamically
     numeric_cols = [f.name for f in df.schema.fields if f.dataType.simpleString() in ("double","int","float","bigint")]
 
     if not numeric_cols:
-        logger.warning(f"No numeric columns found for aggregation in {file_name}")
+        logger.warning(f"No numeric columns found for aggregation in {table}")
         return None
 
     # Build aggregation expressions
@@ -135,16 +161,14 @@ def apply_aggregations(df: DataFrame, file_name: str, fmt: str, data_source: str
 
     # Add metadata
     aggregated_df = grouped.withColumn("data_source", lit(data_source)) \
-                           .withColumn("file_name", lit(file_name)) \
+                           .withColumn("file_name", lit(table)) \
                            .withColumn("ingestion_ts", current_timestamp())
 
-    # Write to PostgreSQL if JDBC properties and DB_URL are defined
-    table = f"{pg_schema}.{fmt}_sensor_agg"
     try:
         aggregated_df.write.jdbc(DB_URL, table, mode="append", properties=JDBC_PROPERTIES)
-        logger.info(f"Aggregated metrics stored in table {table} for {file_name}")
+        logger.info(f"Aggregated metrics stored in table {table} for {table}")
     except Exception as e:
-        logger.error(f"Failed to write aggregated metrics for {file_name} | Error: {e}", exc_info=True)
+        logger.error(f"Failed to write aggregated metrics for {table} | Error: {e}", exc_info=True)
 
     return aggregated_df
 
@@ -159,9 +183,9 @@ def add_metadata(df: DataFrame, file_name: str) -> DataFrame:
              .withColumn("row_hash", sha2(concat_cols, 256))
 
 
-def derive_table_name(file_name: str, fmt: str) -> str:
+def derive_table_name(file_name: str) -> str:
     base = os.path.basename(file_name).split(".")[0]
-    return f"{pg_schema}.{fmt}_{base}".replace("-", "_").replace(" ", "_")
+    return f"{pg_schema}.{base}".replace("-", "_").replace(" ", "_")
 
 
 def read_batch_files(paths: list, fmt: str, spark: SparkSession, schema: StructType = None) -> DataFrame:
@@ -183,7 +207,7 @@ def read_batch_files(paths: list, fmt: str, spark: SparkSession, schema: StructT
     else:
         raise ValueError(f"Unsupported format: {fmt}")
 
-
+@retry(max_attempts=3, delay=5)
 def write_audit(spark, audit_dir, file_name, fmt, total, good, bad, status, message):
     logger.info(f"Writing audit for file: {file_name} | Status: {status}")
     now = datetime.utcnow()
@@ -197,7 +221,8 @@ def write_audit(spark, audit_dir, file_name, fmt, total, good, bad, status, mess
     df.coalesce(1).write.mode("append").json(audit_path)
     logger.info(f"Audit written to {audit_path}")
 
-
+# ---------------- Quarantine ----------------
+@retry(max_attempts=3, delay=5)
 def write_quarantine(bad: DataFrame, quarantine_dir: str, file_name: str):
     if not bad.rdd.isEmpty():
         logger.info(f"Writing {bad.count()} rows to quarantine for file: {file_name}")
