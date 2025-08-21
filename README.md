@@ -98,7 +98,12 @@ sh start.sh
 start.bat
 
 ## Run Upload_Schema_data file
+
+# On Windows
 data_schema_upload.bat
+
+# On Mac Os
+data_schema_upload.sh
 
 ###Author
 Sudhanshu Pukale
