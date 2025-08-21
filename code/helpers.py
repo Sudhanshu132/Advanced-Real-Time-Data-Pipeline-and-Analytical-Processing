@@ -1,21 +1,30 @@
-import hashlib
 import os
-import logging
-from datetime import datetime
 import time
 from functools import wraps
-from pyspark.sql import SparkSession
 from pyspark.sql.functions import col, trim, sha2, concat_ws, coalesce, lit, current_timestamp, when, date_format, isnan
-from pyspark.sql.types import StructType
 from pyspark.sql.functions import min, max, avg, stddev, col
 from pyspark.sql import DataFrame
-from config import * 
+from config import *
+from logger import * 
 
-logging.basicConfig(level=logging.INFO, format='%(asctime)s [%(levelname)s] %(message)s')
-logger = logging.getLogger(__name__)
-pg_schema = "public"
+# ----------------------------
+# Retry Decorator
+# ----------------------------
 
 def retry(max_attempts=3, delay=5, backoff=2):
+    """
+    Retry decorator for fault-tolerant operations.
+    
+    Args:
+        max_attempts (int): Maximum number of retry attempts.
+        delay (int): Initial delay between retries (in seconds).
+        backoff (int): Exponential backoff multiplier.
+
+    Usage:
+        @retry(max_attempts=3, delay=5)
+        def function(...):
+            ...
+    """
     def decorator(func):
         @wraps(func)
         def wrapper(*args, **kwargs):
@@ -34,10 +43,6 @@ def retry(max_attempts=3, delay=5, backoff=2):
         return wrapper
     return decorator
 
-def md5_hex(s: str) -> str:
-    return hashlib.md5(s.encode("utf-8")).hexdigest()
-
-
 def trim_all_strings(df: DataFrame) -> DataFrame:
     for f in df.schema.fields:
         if f.dataType.simpleString() == "string":
@@ -48,14 +53,33 @@ def trim_all_strings(df: DataFrame) -> DataFrame:
 def drop_all_null_rows(df: DataFrame) -> DataFrame:
     return df.na.drop(how="all")
 
+# ----------------------------
+# Data Validation & Quarantine
+# ----------------------------
 
 def validate_and_quarantine(df: DataFrame, file_name: str, quarantine_dir: str,
                             key_fields: list = None, numeric_fields: list = None,
                             ranges: dict = None, heavy_null_threshold: float = 0.5):
     """
-    Generic validator: validates key fields, numeric fields, and ranges.
-    Quarantines invalid rows with error reasons.
-    Automatically adds 'file_path' and 'ingestion_ts' columns.
+    Generic data validator that checks:
+      - Key fields are not null
+      - Numeric fields contain valid numbers
+      - Field values fall within specified ranges
+      - Rows with excessive nulls are flagged
+
+    Bad rows are quarantined with error reasons.
+
+    Args:
+        df (DataFrame): Input dataframe.
+        file_name (str): Source file name.
+        quarantine_dir (str): Path to quarantine invalid rows.
+        key_fields (list): List of mandatory key columns.
+        numeric_fields (list): Columns expected to be numeric.
+        ranges (dict): Range checks in format {col: (min, max)}.
+        heavy_null_threshold (float): Proportion of nulls in row considered invalid.
+
+    Returns:
+        (DataFrame, DataFrame): Tuple of (good_rows, bad_rows).
     """
     if df is None or df.rdd.isEmpty():
         return df, df
@@ -117,17 +141,23 @@ def validate_and_quarantine(df: DataFrame, file_name: str, quarantine_dir: str,
 
     return good, bad
 
-logger = logging.getLogger(__name__)
-# ---------------- Aggregations ----------------
-@retry(max_attempts=3, delay=5)
-def write_jdbc(df: DataFrame, table: str):
-    df.write.jdbc(DB_URL, table, "append", properties=JDBC_PROPERTIES)
-
+# ----------------------------
+# Aggregations
+# ----------------------------
 
 def apply_aggregations(df: DataFrame, table: str, data_source: str = "minio_bucket") -> DataFrame:
     """
-    Aggregates numeric columns per sensor_id (or default if missing) and adds metadata.
-    Handles missing numeric columns gracefully.
+    Apply basic aggregations (min, max, avg, stddev) on numeric columns.
+    Grouped by 'sensor_id' (or default value if missing).
+    Writes results into Postgres.
+
+    Args:
+        df (DataFrame): Input data.
+        table (str): Target table name.
+        data_source (str): Source identifier.
+
+    Returns:
+        DataFrame: Aggregated result with metadata.
     """
     if df is None or df.rdd.isEmpty():
         logger.warning(f"No data to aggregate for {table}")
@@ -163,7 +193,8 @@ def apply_aggregations(df: DataFrame, table: str, data_source: str = "minio_buck
     aggregated_df = grouped.withColumn("data_source", lit(data_source)) \
                            .withColumn("file_name", lit(table)) \
                            .withColumn("ingestion_ts", current_timestamp())
-
+    
+    # Persist aggregated metrics
     try:
         aggregated_df.write.jdbc(DB_URL, table, mode="append", properties=JDBC_PROPERTIES)
         logger.info(f"Aggregated metrics stored in table {table} for {table}")
@@ -171,8 +202,9 @@ def apply_aggregations(df: DataFrame, table: str, data_source: str = "minio_buck
         logger.error(f"Failed to write aggregated metrics for {table} | Error: {e}", exc_info=True)
 
     return aggregated_df
-
-
+# ----------------------------
+# Metadata Helpers
+# ----------------------------
 def add_metadata(df: DataFrame, file_name: str) -> DataFrame:
     """
     Adds metadata columns: 'file_path', 'ingestion_ts', and row hash
@@ -184,49 +216,29 @@ def add_metadata(df: DataFrame, file_name: str) -> DataFrame:
 
 
 def derive_table_name(file_name: str) -> str:
+    """Generate a Postgres table name from a file name (safe for schema)."""
     base = os.path.basename(file_name).split(".")[0]
-    return f"{pg_schema}.{base}".replace("-", "_").replace(" ", "_")
+    return f"{DB_SCHEMA}.{base}".replace("-", "_").replace(" ", "_")
 
 
-def read_batch_files(paths: list, fmt: str, spark: SparkSession, schema: StructType = None) -> DataFrame:
-    logger.info(f"Reading {fmt.upper()} files: {paths} with schema: {'provided' if schema else 'inferred'}")
-    if fmt.lower() == "csv":
-        reader = spark.read.option("header", "true")
-        if schema:
-            reader = reader.schema(schema)
-        else:
-            reader = reader.option("inferSchema", "true")
-        return reader.csv(paths)
-    elif fmt.lower() == "json":
-        reader = spark.read
-        if schema:
-            reader = reader.schema(schema)
-        else:
-            reader = reader.option("inferSchema", "true")
-        return reader.json(paths)
-    else:
-        raise ValueError(f"Unsupported format: {fmt}")
 
-@retry(max_attempts=3, delay=5)
-def write_audit(spark, audit_dir, file_name, fmt, total, good, bad, status, message):
-    logger.info(f"Writing audit for file: {file_name} | Status: {status}")
-    now = datetime.utcnow()
-    ts_str = now.strftime("%Y-%m-%d %H:%M:%S")
-    audit_date = now.strftime("%Y-%m-%d")
-    data = [(ts_str, file_name, fmt, total, good, bad, status, message)]
-    columns = ["ts","file_name","format","total_rows","good_rows","bad_rows","status","message"]
-    df = spark.createDataFrame(data, schema=columns) \
-              .withColumn("audit_date", lit(audit_date))
-    audit_path = f"{audit_dir}/audit_date={audit_date}"
-    df.coalesce(1).write.mode("append").json(audit_path)
-    logger.info(f"Audit written to {audit_path}")
+# ----------------------------
+# Quarantine
+# ----------------------------
 
-# ---------------- Quarantine ----------------
 @retry(max_attempts=3, delay=5)
 def write_quarantine(bad: DataFrame, quarantine_dir: str, file_name: str):
+    """
+    Persist invalid (quarantined) rows as JSON, partitioned by date.
+    
+    Args:
+        bad (DataFrame): Invalid rows.
+        quarantine_dir (str): Directory for quarantined data.
+        file_name (str): Source file name.
+    """
     if not bad.rdd.isEmpty():
         logger.info(f"Writing {bad.count()} rows to quarantine for file: {file_name}")
         bad = bad.withColumn("quarantine_date", date_format(current_timestamp(), "yyyy-MM-dd"))
         bad.write.mode("append")\
            .partitionBy("quarantine_date")\
-           .json(os.path.join(quarantine_dir, md5_hex(file_name))) # It should indicate filename
+           .json(os.path.join(quarantine_dir,derive_table_name(file_name)))

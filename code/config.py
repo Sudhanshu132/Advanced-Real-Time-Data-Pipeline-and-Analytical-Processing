@@ -1,6 +1,8 @@
 import os
 
+# ----------------------------
 # MinIO Config
+# ----------------------------
 
 MINIO_ENDPOINT   = os.getenv("MINIO_ENDPOINT")
 MINIO_ACCESS_KEY = os.getenv("MINIO_ACCESS_KEY")
@@ -15,11 +17,14 @@ CHECKPOINT_PATH  = os.getenv("CHECKPOINT_PATH", "/tmp/spark-checkpoints")
 TRIGGER_INTERVAL_SEC = os.getenv("TRIGGER_INTERVAL_SEC")
 
 
+# ----------------------------
 # PostgreSQL Config
+# ----------------------------
 
 DB_URL      = os.getenv("DB_URL")
 DB_USER     = os.getenv("DB_USER")
 DB_PASSWORD = os.getenv("DB_PASSWORD")
+DB_SCHEMA = "public"
 
 JDBC_PROPERTIES = {
     "user": DB_USER,
